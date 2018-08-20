@@ -1,0 +1,15 @@
+[jira]
+url = https://yourorganization.atlassian.net/
+username = user@host.com
+password = password
+# the JIRA project ID (short)
+project = PRO
+
+[gitlab]
+url = https://gitlab.com/
+# this token will be used whenever the API is invoked and the script
+# will be unable to match the jira's author of the comment / attachment / issue
+# this identity will be used instead.
+token = token
+# the project in gitlab that you are importing issues to.
+project = ussername/project-name
