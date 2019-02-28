@@ -1,6 +1,7 @@
 import configparser
 import sys
 from io import StringIO
+from io import BytesIO
 
 import requests
 from urllib.parse import quote
@@ -91,10 +92,47 @@ if not GITLAB_PROJECT_ID:
         gitlab_project_name = gitlab_project_connection.json()["path_with_namespace"]
         print(f"Project found: {gitlab_project_name} {gitlab_project_id }")
 
+next_url = GITLAB_URL + f'api/v4/projects/{quote(GITLAB_PROJECT, safe="")}/issues?per_page=100'
+not_finished = False
+while (not_finished):
+    res = requests.get(
+        next_url,
+        headers={'PRIVATE-TOKEN': GITLAB_TOKEN}
+    )
+    gitlab_issues = res.json()
+    print(f"Try to delete {len(gitlab_issues)} old issues from gitlab.")
+    for issue in gitlab_issues:
+        res = requests.delete(
+            GITLAB_URL + f'api/v4/projects/{quote(GITLAB_PROJECT, safe="")}/issues/{issue["iid"]}',
+            headers={'PRIVATE-TOKEN': GITLAB_TOKEN}
+        )
+        if res.status_code != 204:
+            print(f"Failed to delete old issue '{issue['iid']}' {res.status_code}-{res.reason}")
+
+    links = res.links
+    if 'next' in links:
+        next_url = links['next']['url']
+    else:
+        not_finished = False
 
 for issue in jira_issues:
     reporter = issue['fields']['reporter']['name']
-    print(reporter)
+    print(issue['key'] +' - '+ issue['fields']['summary'])
+
+    assignee = []
+    if 'assignee' in issue['fields'] and issue['fields']['assignee'] is not None and 'name' in issue['fields']['assignee']:
+        if issue['fields']['assignee']['name'] in GITLAB_USER_NAMES:
+            assignee.append(requests.get(
+                GITLAB_URL + f'api/v4/users?username=' + GITLAB_USER_NAMES[issue['fields']['assignee']['name']],
+                headers={'PRIVATE-TOKEN': GITLAB_TOKEN}
+            ).json()[0]['id'])
+
+    labels = ''
+    labels += ',' + issue['fields']['status']['name']
+    labels += ',' + issue['fields']['issuetype']['name']
+    labels += ',' + issue['key']
+    for fixVersion in issue['fields']['fixVersions']:
+        labels += ',' + fixVersion['name']
 
     gl_issue = requests.post(
         GITLAB_URL + f'api/v4/projects/{quote(GITLAB_PROJECT, safe="")}/issues',
@@ -102,9 +140,22 @@ for issue in jira_issues:
         data={
             'title': issue['fields']['summary'],
             'description': issue['fields']['description'],
-            'created_at': issue['fields']['created']
+            'created_at': issue['fields']['created'],
+            'assignee_ids': assignee,
+            'labels': labels
         }
-    ).json()['id']
+    ).json()['iid']
+
+    if issue['fields']['resolutiondate'] is not None:
+        res = requests.put(
+            GITLAB_URL + f'api/v4/projects/{quote(GITLAB_PROJECT, safe="")}/issues/{gl_issue}',
+            headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
+            data={
+                'state_event': 'close',
+                'closed_at': issue['fields']['resolutiondate']
+            }
+        )
+        #print(res.json())
 
     # get comments and attachments
     issue_info = requests.get(
@@ -113,11 +164,18 @@ for issue in jira_issues:
         headers={'Content-Type': 'application/json'}
     ).json()
 
+    requests.post(
+        GITLAB_URL + 'api/v4/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue),
+        headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
+        data={
+            'body': JIRA_URL + 'browse/'+ issue['key']
+        }
+    )
     for comment in issue_info['fields']['comment']['comments']:
         author = comment['author']['name']
 
         note_add = requests.post(
-            GITLAB_URL + 'api/v3/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue),
+            GITLAB_URL + 'api/v4/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue),
             headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
             data={
                 'body': comment['body'],
@@ -134,10 +192,10 @@ for issue in jira_issues:
                 auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_PASSWORD),
             )
 
-            _content = StringIO(_file.content)
+            _content = BytesIO(_file.content)
 
             file_info = requests.post(
-                GITLAB_URL + 'api/v3/projects/%s/uploads' % GITLAB_PROJECT_ID,
+                GITLAB_URL + 'api/v4/projects/%s/uploads' % GITLAB_PROJECT_ID,
                 headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
                 files={
                     'file': (
@@ -152,14 +210,13 @@ for issue in jira_issues:
             # now we got the upload URL. Let's post the comment with an
             # attachment
             requests.post(
-                GITLAB_URL + 'api/v3/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue),
+                GITLAB_URL + 'api/v4/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue),
                 headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
                 data={
                     'body': file_info.json()['markdown'],
                     'created_at': attachment['created']
                 }
             )
-
     print("created issue #%s" % gl_issue)
 
 print("imported %s issues from project %s" % (len(jira_issues), JIRA_PROJECT))
